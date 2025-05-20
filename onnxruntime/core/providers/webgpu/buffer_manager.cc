@@ -5,14 +5,18 @@
 #include "core/providers/webgpu/webgpu_context.h"
 #include <chrono>
 #include <ctime>
+#include <fstream>
+#include <iomanip>
 
 namespace onnxruntime {
 namespace webgpu {
 
 namespace {
 // Buffer cache configuration.
-// Time after which an unused buffer may be released.
-constexpr std::chrono::seconds BUFFER_TIMEOUT{1};
+// Cache configuration: Buffers that haven't been used for BUFFER_TIMEOUT milliseconds will be released
+constexpr std::chrono::milliseconds BUFFER_TIMEOUT{1000};
+constexpr const char* METRICS_FILE = "webgpu_memory_metrics_1000ms.csv";
+constexpr const char* METRICS_HEADER = "Timestamp,TotalMemory(MB),PeakMemory(MB),ActiveBuffers,TotalBuffers,TimeoutMs\n";
 
 struct CachedBuffer {
   WGPUBuffer buffer;
@@ -144,12 +148,37 @@ class BucketCacheManager : public IBufferCacheManager {
   static constexpr size_t MIN_BUCKET_SIZE = 64;        // Minimum bucket size (must be multiple of 16)
   static constexpr size_t MAX_BUCKET_COUNT = 500;      // Maximum number of buckets to prevent unbounded growth
   static constexpr size_t INITIAL_BUCKET_LIMIT = 100;  // Initial limit for new buckets
+
+  // Memory metrics
+  int64_t total_memory_{0};     // Current total allocated memory
+  int64_t peak_memory_{0};      // Peak memory usage observed
+  int64_t active_buffers_{0};   // Number of buffers currently in use
+  int64_t total_buffers_{0};    // Total number of buffers (active + cached)
+  std::ofstream metrics_file_;  // File stream for logging metrics
  public:
   BucketCacheManager() {
     Initialize();
+    OpenMetricsFile();
   }
   BucketCacheManager(std::unordered_map<size_t, size_t>&& buckets_limit) : buckets_limit_{buckets_limit} {
     Initialize();
+    OpenMetricsFile();
+  }
+
+  ~BucketCacheManager() {
+    // Release remaining buffers
+    for (auto& pair : buckets_) {
+      for (auto& cached_buffer : pair.second) {
+        if (cached_buffer.buffer != nullptr) {
+          UpdateMetrics(false, wgpuBufferGetSize(cached_buffer.buffer), true);
+          wgpuBufferRelease(cached_buffer.buffer);
+        }
+      }
+    }
+
+    if (metrics_file_.is_open()) {
+      metrics_file_.close();
+    }
   }
 
   size_t CalculateBufferSize(size_t request_size) override {
@@ -169,25 +198,34 @@ class BucketCacheManager : public IBufferCacheManager {
     if (it != buckets_.end() && !it->second.empty()) {
       auto cached_buffer = it->second.back();
       it->second.pop_back();
+      // Buffer reactivated from cache
+      UpdateMetrics(true, 0);
       return cached_buffer.buffer;
     }
     return nullptr;
   }
 
-  void RegisterBuffer(WGPUBuffer /*buffer*/, size_t /*request_size*/) override {
-    // no-op
+  void RegisterBuffer(WGPUBuffer buffer, size_t request_size) override {
+    const auto buffer_size = wgpuBufferGetSize(buffer);
+    UpdateMetrics(true, buffer_size);
   }
 
   void ReleaseBuffer(WGPUBuffer buffer) override {
-    const auto buffer_size = wgpuBufferGetSize(buffer);
-    auto it = buckets_.find(buffer_size);
-    if (it != buckets_.end() && it->second.size() < buckets_limit_[buffer_size]) {
-      CachedBuffer cached_buffer{
-          buffer,
-          std::chrono::steady_clock::now()};
-      it->second.push_back(cached_buffer);
-    } else {
-      wgpuBufferRelease(buffer);
+    if (buffer != nullptr) {
+      const auto buffer_size = wgpuBufferGetSize(buffer);
+      auto it = buckets_.find(buffer_size);
+      if (it != buckets_.end() && it->second.size() < buckets_limit_[buffer_size]) {
+        CachedBuffer cached_buffer{
+            buffer,
+            std::chrono::steady_clock::now()};
+        it->second.push_back(cached_buffer);
+        // Buffer moved to cache, still counts in total memory but not active
+        UpdateMetrics(false, 0);
+      } else {
+        // Buffer truly released, update both counters
+        UpdateMetrics(false, buffer_size);
+        wgpuBufferRelease(buffer);
+      }
     }
   }
 
@@ -202,9 +240,6 @@ class BucketCacheManager : public IBufferCacheManager {
       const auto size = bucket_pair.first;
       auto& bucket_vec = bucket_pair.second;
 
-      // Store the original size to check if we removed any buffers
-      const size_t original_size = bucket_vec.size();
-
       // Remove timed out buffers from the back
       while (!bucket_vec.empty()) {
         auto& cached_buffer = bucket_vec.back();
@@ -214,8 +249,11 @@ class BucketCacheManager : public IBufferCacheManager {
           break;
         }
 
-        // Release the buffer before removing it from our tracking
+        // Release the buffer and update metrics
         if (cached_buffer.buffer != nullptr) {
+          // Don't decrease active buffer count since it's already decreased in ReleaseBuffer when moving to cache
+          // But we still need to update total memory
+          UpdateMetrics(false, wgpuBufferGetSize(cached_buffer.buffer), false, false);
           wgpuBufferRelease(cached_buffer.buffer);
           cached_buffer.buffer = nullptr;  // Prevent potential double-free
         }
@@ -236,14 +274,6 @@ class BucketCacheManager : public IBufferCacheManager {
     }
   }
 
-  ~BucketCacheManager() {
-    for (auto& pair : buckets_) {
-      for (auto& cached_buffer : pair.second) {
-        wgpuBufferRelease(cached_buffer.buffer);
-      }
-    }
-  }
-
  protected:
   void Initialize() {
     buckets_.reserve(MAX_BUCKET_COUNT);
@@ -253,6 +283,57 @@ class BucketCacheManager : public IBufferCacheManager {
     for (const auto& pair : buckets_limit_) {
       buckets_.emplace(pair.first, std::vector<CachedBuffer>());
     }
+  }
+
+  void OpenMetricsFile() {
+    metrics_file_.open(METRICS_FILE, std::ios::out | std::ios::trunc);
+    if (metrics_file_.is_open()) {
+      metrics_file_ << METRICS_HEADER;
+      metrics_file_.flush();
+    }
+  }
+
+  void LogMetrics() {
+    if (!metrics_file_.is_open()) return;
+
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    metrics_file_ << std::put_time(std::localtime(&time_t_now), "%Y-%m-%d %H:%M:%S") << ","
+                  << std::fixed << std::setprecision(2)
+                  << static_cast<double>(total_memory_) / (1024 * 1024) << ","  // Convert to MB
+                  << static_cast<double>(peak_memory_) / (1024 * 1024) << ","
+                  << active_buffers_ << ","
+                  << total_buffers_ << ","
+                  << BUFFER_TIMEOUT.count() << std::endl;
+    metrics_file_.flush();
+  }
+
+  void UpdateMetrics(bool is_allocation, size_t buffer_size, bool is_from_destructor = false, bool update_active_buffers = true) {
+    if (is_allocation) {
+      total_memory_ += buffer_size;
+      if (update_active_buffers) {
+        active_buffers_++;
+      }
+      if (buffer_size > 0) {
+        total_buffers_++;
+      }
+      peak_memory_ = std::max(peak_memory_, total_memory_);
+    } else {
+      total_memory_ -= buffer_size;
+      if (update_active_buffers) {
+        if (is_from_destructor) {
+          active_buffers_ = std::max(active_buffers_ - 1, 0LL);
+        } else {
+          active_buffers_--;
+        }
+      }
+      // Only decrement total_buffers when truly releasing a buffer (buffer_size > 0)
+      // For cache operations where buffer_size = 0, we keep the total count
+      if (buffer_size > 0) {
+        total_buffers_--;
+      }
+    }
+    LogMetrics();
   }
   std::unordered_map<size_t, size_t> buckets_limit_;
   std::unordered_map<size_t, std::vector<CachedBuffer>> buckets_;
