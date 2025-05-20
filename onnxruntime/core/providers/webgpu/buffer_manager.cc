@@ -3,13 +3,24 @@
 
 #include "core/providers/webgpu/buffer_manager.h"
 #include "core/providers/webgpu/webgpu_context.h"
+#include <chrono>
+#include <ctime>
 
 namespace onnxruntime {
 namespace webgpu {
 
 namespace {
+// Buffer cache configuration.
+// Time after which an unused buffer may be released.
+constexpr std::chrono::seconds BUFFER_TIMEOUT{1};
 
-constexpr size_t NormalizeBufferSize(size_t size) {
+struct CachedBuffer {
+  WGPUBuffer buffer;
+  std::chrono::steady_clock::time_point last_used;
+};
+
+constexpr size_t
+NormalizeBufferSize(size_t size) {
   return (size + 15) / 16 * 16;
 }
 
@@ -127,41 +138,14 @@ class SimpleCacheManager : public IBufferCacheManager {
   std::vector<WGPUBuffer> pending_buffers_;
 };
 
-// TODO: maybe use different bucket size for storage and uniform buffers?
-constexpr std::initializer_list<std::pair<const size_t, size_t>> BUCKET_DEFAULT_LIMIT_TABLE = {
-    {64, 250},
-    {128, 200},
-    {256, 200},
-    {512, 200},
-    {2048, 230},
-    {4096, 200},
-    {8192, 50},
-    {16384, 50},
-    {32768, 50},
-    {65536, 50},
-    {131072, 50},
-    {262144, 50},
-    {524288, 50},
-    {1048576, 50},
-    {2097152, 30},
-    {4194304, 20},
-    {8388608, 10},
-    {12582912, 10},
-    {16777216, 10},
-    {26214400, 15},
-    {33554432, 22},
-    {44236800, 2},
-    {58982400, 6},
-    // we don't want to cache the bucket sizes below but not caching them
-    // results in some major performance hits for models like sd-turbo.
-    {67108864, 6},
-    {134217728, 6},
-    {167772160, 6},
-};
-
 class BucketCacheManager : public IBufferCacheManager {
+ private:
+  // Constants for dynamic bucket management
+  static constexpr size_t MIN_BUCKET_SIZE = 64;        // Minimum bucket size (must be multiple of 16)
+  static constexpr size_t MAX_BUCKET_COUNT = 500;      // Maximum number of buckets to prevent unbounded growth
+  static constexpr size_t INITIAL_BUCKET_LIMIT = 100;  // Initial limit for new buckets
  public:
-  BucketCacheManager() : buckets_limit_{BUCKET_DEFAULT_LIMIT_TABLE} {
+  BucketCacheManager() {
     Initialize();
   }
   BucketCacheManager(std::unordered_map<size_t, size_t>&& buckets_limit) : buckets_limit_{buckets_limit} {
@@ -169,21 +153,23 @@ class BucketCacheManager : public IBufferCacheManager {
   }
 
   size_t CalculateBufferSize(size_t request_size) override {
-    // binary serch size
-    auto it = std::lower_bound(buckets_keys_.begin(), buckets_keys_.end(), request_size);
-    if (it == buckets_keys_.end()) {
-      return NormalizeBufferSize(request_size);
-    } else {
-      return *it;
+    size_t bucket_size = NormalizeBufferSize(request_size);
+
+    // Initialize a new bucket if we don't have one for this size
+    if (buckets_.find(bucket_size) == buckets_.end() && buckets_.size() < MAX_BUCKET_COUNT) {
+      buckets_.emplace(bucket_size, std::vector<CachedBuffer>());
+      buckets_limit_.emplace(bucket_size, INITIAL_BUCKET_LIMIT);
     }
+
+    return bucket_size;
   }
 
   WGPUBuffer TryAcquireCachedBuffer(size_t buffer_size) override {
     auto it = buckets_.find(buffer_size);
     if (it != buckets_.end() && !it->second.empty()) {
-      auto buffer = it->second.back();
+      auto cached_buffer = it->second.back();
       it->second.pop_back();
-      return buffer;
+      return cached_buffer.buffer;
     }
     return nullptr;
   }
@@ -193,60 +179,83 @@ class BucketCacheManager : public IBufferCacheManager {
   }
 
   void ReleaseBuffer(WGPUBuffer buffer) override {
-    pending_buffers_.emplace_back(buffer);
+    const auto buffer_size = wgpuBufferGetSize(buffer);
+    auto it = buckets_.find(buffer_size);
+    if (it != buckets_.end() && it->second.size() < buckets_limit_[buffer_size]) {
+      CachedBuffer cached_buffer{
+          buffer,
+          std::chrono::steady_clock::now()};
+      it->second.push_back(cached_buffer);
+    } else {
+      wgpuBufferRelease(buffer);
+    }
   }
 
   void OnRefresh() override {
-    // TODO: consider graph capture. currently not supported
+    auto now = std::chrono::steady_clock::now();
 
-    for (auto& buffer : pending_buffers_) {
-      auto buffer_size = static_cast<size_t>(wgpuBufferGetSize(buffer));
+    // Use a vector to store keys that need to be erased to avoid iterator invalidation
+    std::vector<size_t> sizes_to_erase;
 
-      auto it = buckets_.find(buffer_size);
-      if (it != buckets_.end() && it->second.size() < buckets_limit_[buffer_size]) {
-        it->second.emplace_back(buffer);
-      } else {
-        wgpuBufferRelease(buffer);
+    // Clean up timed out buffers in each bucket
+    for (auto& bucket_pair : buckets_) {
+      const auto size = bucket_pair.first;
+      auto& bucket_vec = bucket_pair.second;
+
+      // Store the original size to check if we removed any buffers
+      const size_t original_size = bucket_vec.size();
+
+      // Remove timed out buffers from the back
+      while (!bucket_vec.empty()) {
+        auto& cached_buffer = bucket_vec.back();
+
+        // Check if buffer timeout has elapsed
+        if (now - cached_buffer.last_used < BUFFER_TIMEOUT) {
+          break;
+        }
+
+        // Release the buffer before removing it from our tracking
+        if (cached_buffer.buffer != nullptr) {
+          wgpuBufferRelease(cached_buffer.buffer);
+          cached_buffer.buffer = nullptr;  // Prevent potential double-free
+        }
+
+        bucket_vec.pop_back();
+      }
+
+      // If bucket is empty after cleanup, mark it for removal
+      if (bucket_vec.empty()) {
+        sizes_to_erase.push_back(size);
       }
     }
 
-    pending_buffers_.clear();
+    // Remove empty buckets
+    for (const auto& size : sizes_to_erase) {
+      buckets_.erase(size);
+      buckets_limit_.erase(size);
+    }
   }
 
   ~BucketCacheManager() {
-    for (auto& buffer : pending_buffers_) {
-      wgpuBufferRelease(buffer);
-    }
     for (auto& pair : buckets_) {
-      for (auto& buffer : pair.second) {
-        wgpuBufferRelease(buffer);
+      for (auto& cached_buffer : pair.second) {
+        wgpuBufferRelease(cached_buffer.buffer);
       }
     }
   }
 
  protected:
   void Initialize() {
-    buckets_keys_.reserve(buckets_limit_.size());
-    buckets_.reserve(buckets_limit_.size());
-    for (const auto& pair : buckets_limit_) {
-      buckets_keys_.push_back(pair.first);
-      buckets_.emplace(pair.first, std::vector<WGPUBuffer>());
-    }
-    std::sort(buckets_keys_.begin(), buckets_keys_.end());
-
+    buckets_.reserve(MAX_BUCKET_COUNT);
 #ifndef NDEBUG  // if debug build
-    ORT_ENFORCE(std::all_of(buckets_keys_.begin(), buckets_keys_.end(), [](size_t size) { return size % 16 == 0; }),
-                "Bucket sizes must be multiples of 16.");
-
-    for (size_t i = 1; i < buckets_keys_.size(); ++i) {
-      ORT_ENFORCE(buckets_keys_[i] > buckets_keys_[i - 1], "Bucket sizes must be in increasing order.");
-    }
+    ORT_ENFORCE(buckets_limit_.size() <= MAX_BUCKET_COUNT, "Bucket limit sizes cannot be greater than MAX_BUCKET_COUNT.");
 #endif
+    for (const auto& pair : buckets_limit_) {
+      buckets_.emplace(pair.first, std::vector<CachedBuffer>());
+    }
   }
   std::unordered_map<size_t, size_t> buckets_limit_;
-  std::unordered_map<size_t, std::vector<WGPUBuffer>> buckets_;
-  std::vector<WGPUBuffer> pending_buffers_;
-  std::vector<size_t> buckets_keys_;
+  std::unordered_map<size_t, std::vector<CachedBuffer>> buckets_;
 };
 
 std::unique_ptr<IBufferCacheManager> CreateBufferCacheManager(BufferCacheMode cache_mode) {
