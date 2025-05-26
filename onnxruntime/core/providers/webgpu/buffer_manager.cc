@@ -15,7 +15,7 @@ namespace {
 // Buffer cache configuration.
 // Cache configuration: Buffers that haven't been used for BUFFER_TIMEOUT milliseconds will be released
 constexpr std::chrono::milliseconds BUFFER_TIMEOUT{1000};
-constexpr const char* METRICS_FILE = "webgpu_memory_metrics_1000ms.csv";
+constexpr const char* METRICS_FILE = "webgpu_memory_metrics_1000ms_no_timeout_clean_up.csv";
 constexpr const char* METRICS_HEADER = "Timestamp,TotalMemory(MB),PeakMemory(MB),ActiveBuffers,TotalBuffers,TimeoutMs\n";
 
 struct CachedBuffer {
@@ -230,48 +230,7 @@ class BucketCacheManager : public IBufferCacheManager {
   }
 
   void OnRefresh() override {
-    auto now = std::chrono::steady_clock::now();
-
-    // Use a vector to store keys that need to be erased to avoid iterator invalidation
-    std::vector<size_t> sizes_to_erase;
-
-    // Clean up timed out buffers in each bucket
-    for (auto& bucket_pair : buckets_) {
-      const auto size = bucket_pair.first;
-      auto& bucket_vec = bucket_pair.second;
-
-      // Remove timed out buffers from the back
-      while (!bucket_vec.empty()) {
-        auto& cached_buffer = bucket_vec.back();
-
-        // Check if buffer timeout has elapsed
-        if (now - cached_buffer.last_used < BUFFER_TIMEOUT) {
-          break;
-        }
-
-        // Release the buffer and update metrics
-        if (cached_buffer.buffer != nullptr) {
-          // Don't decrease active buffer count since it's already decreased in ReleaseBuffer when moving to cache
-          // But we still need to update total memory
-          UpdateMetrics(false, wgpuBufferGetSize(cached_buffer.buffer), false, false);
-          wgpuBufferRelease(cached_buffer.buffer);
-          cached_buffer.buffer = nullptr;  // Prevent potential double-free
-        }
-
-        bucket_vec.pop_back();
-      }
-
-      // If bucket is empty after cleanup, mark it for removal
-      if (bucket_vec.empty()) {
-        sizes_to_erase.push_back(size);
-      }
-    }
-
-    // Remove empty buckets
-    for (const auto& size : sizes_to_erase) {
-      buckets_.erase(size);
-      buckets_limit_.erase(size);
-    }
+    // No op.
   }
 
  protected:
