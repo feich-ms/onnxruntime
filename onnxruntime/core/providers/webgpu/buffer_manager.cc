@@ -15,7 +15,7 @@ namespace {
 // Buffer cache configuration.
 // Cache configuration: Buffers that haven't been used for BUFFER_TIMEOUT milliseconds will be released
 constexpr std::chrono::milliseconds BUFFER_TIMEOUT{1000};
-constexpr const char* METRICS_FILE = "webgpu_memory_metrics_1000ms.csv";
+constexpr const char* METRICS_FILE = "webgpu_memory_metrics_1000ms_no_fast_release.csv";
 constexpr const char* METRICS_HEADER = "Timestamp,TotalMemory(MB),PeakMemory(MB),ActiveBuffers,TotalBuffers,TimeoutMs\n";
 
 struct CachedBuffer {
@@ -167,6 +167,13 @@ class BucketCacheManager : public IBufferCacheManager {
 
   ~BucketCacheManager() {
     // Release remaining buffers
+    for (auto& pending_buffer : pending_buffers_) {
+      if (pending_buffer.buffer != nullptr) {
+        UpdateMetrics(false, wgpuBufferGetSize(pending_buffer.buffer), true);
+        wgpuBufferRelease(pending_buffer.buffer);
+      }
+    }
+
     for (auto& pair : buckets_) {
       for (auto& cached_buffer : pair.second) {
         if (cached_buffer.buffer != nullptr) {
@@ -211,27 +218,30 @@ class BucketCacheManager : public IBufferCacheManager {
   }
 
   void ReleaseBuffer(WGPUBuffer buffer) override {
-    if (buffer != nullptr) {
-      const auto buffer_size = wgpuBufferGetSize(buffer);
+    CachedBuffer cached_buffer{
+        buffer,
+        std::chrono::steady_clock::now()};
+    pending_buffers_.emplace_back(std::move(cached_buffer));
+  }
+
+  void OnRefresh() override {
+    for (auto& cached_buffer : pending_buffers_) {
+      const auto buffer_size = wgpuBufferGetSize(cached_buffer.buffer);
       auto it = buckets_.find(buffer_size);
       if (it != buckets_.end() && it->second.size() < buckets_limit_[buffer_size]) {
-        CachedBuffer cached_buffer{
-            buffer,
-            std::chrono::steady_clock::now()};
-        it->second.push_back(cached_buffer);
+        // Move to cache
+        it->second.push_back(std::move(cached_buffer));
         // Buffer moved to cache, still counts in total memory but not active
         UpdateMetrics(false, 0);
       } else {
         // Buffer truly released, update both counters
         UpdateMetrics(false, buffer_size);
-        wgpuBufferRelease(buffer);
+        wgpuBufferRelease(cached_buffer.buffer);
       }
     }
-  }
+    pending_buffers_.clear();
 
-  void OnRefresh() override {
     auto now = std::chrono::steady_clock::now();
-
     // Use a vector to store keys that need to be erased to avoid iterator invalidation
     std::vector<size_t> sizes_to_erase;
 
@@ -337,6 +347,7 @@ class BucketCacheManager : public IBufferCacheManager {
   }
   std::unordered_map<size_t, size_t> buckets_limit_;
   std::unordered_map<size_t, std::vector<CachedBuffer>> buckets_;
+  std::vector<CachedBuffer> pending_buffers_;  // Buffers pending release
 };
 
 std::unique_ptr<IBufferCacheManager> CreateBufferCacheManager(BufferCacheMode cache_mode) {
