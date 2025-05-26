@@ -15,7 +15,7 @@ namespace {
 // Buffer cache configuration.
 // Cache configuration: Buffers that haven't been used for BUFFER_TIMEOUT milliseconds will be released
 constexpr std::chrono::milliseconds BUFFER_TIMEOUT{1000};
-constexpr const char* METRICS_FILE = "webgpu_memory_metrics_1000ms.csv";
+constexpr const char* METRICS_FILE = "webgpu_memory_metrics_1000ms_with_clean_up_but_no_timeout.csv";
 constexpr const char* METRICS_HEADER = "Timestamp,TotalMemory(MB),PeakMemory(MB),ActiveBuffers,TotalBuffers,TimeoutMs\n";
 
 struct CachedBuffer {
@@ -239,27 +239,6 @@ class BucketCacheManager : public IBufferCacheManager {
     for (auto& bucket_pair : buckets_) {
       const auto size = bucket_pair.first;
       auto& bucket_vec = bucket_pair.second;
-
-      // Remove timed out buffers from the back
-      while (!bucket_vec.empty()) {
-        auto& cached_buffer = bucket_vec.back();
-
-        // Check if buffer timeout has elapsed
-        if (now - cached_buffer.last_used < BUFFER_TIMEOUT) {
-          break;
-        }
-
-        // Release the buffer and update metrics
-        if (cached_buffer.buffer != nullptr) {
-          // Don't decrease active buffer count since it's already decreased in ReleaseBuffer when moving to cache
-          // But we still need to update total memory
-          UpdateMetrics(false, wgpuBufferGetSize(cached_buffer.buffer), false, false);
-          wgpuBufferRelease(cached_buffer.buffer);
-          cached_buffer.buffer = nullptr;  // Prevent potential double-free
-        }
-
-        bucket_vec.pop_back();
-      }
 
       // If bucket is empty after cleanup, mark it for removal
       if (bucket_vec.empty()) {
