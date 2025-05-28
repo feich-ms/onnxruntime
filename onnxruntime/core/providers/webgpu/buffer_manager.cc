@@ -12,7 +12,7 @@ namespace onnxruntime {
 namespace webgpu {
 
 namespace {
-constexpr const char* METRICS_FILE = "webgpu_memory_metrics_session_run_op.csv";
+constexpr const char* METRICS_FILE = "webgpu_memory_metrics_session_optimization_no_fast_release_and_with_default_bucket_limits.csv";
 constexpr const char* METRICS_HEADER = "Timestamp,TotalMemory(MB),PeakMemory(MB),ActiveBuffers,TotalBuffers,TimeoutMs\n";
 
 constexpr size_t NormalizeBufferSize(size_t size) {
