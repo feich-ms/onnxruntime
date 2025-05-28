@@ -15,7 +15,7 @@ namespace {
 // Buffer cache configuration.
 // Cache configuration: Buffers that haven't been used for BUFFER_TIMEOUT milliseconds will be released
 constexpr std::chrono::milliseconds BUFFER_TIMEOUT{1000};
-constexpr const char* METRICS_FILE = "webgpu_memory_metrics_1000ms_with_clean_up_but_no_timeout.csv";
+constexpr const char* METRICS_FILE = "webgpu_memory_metrics_fast_release_and_clean_up_but_no_timeout.csv";
 constexpr const char* METRICS_HEADER = "Timestamp,TotalMemory(MB),PeakMemory(MB),ActiveBuffers,TotalBuffers,TimeoutMs\n";
 
 struct CachedBuffer {
