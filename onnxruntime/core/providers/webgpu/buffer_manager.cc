@@ -12,8 +12,8 @@ namespace onnxruntime {
 namespace webgpu {
 
 namespace {
-constexpr const char* METRICS_FILE = "memory_result_no_memory_optimization_with_early_release.csv";
-constexpr const char* METRICS_HEADER = "Timestamp,TotalMemory(MB),PeakMemory(MB),ActiveBuffers,TotalBuffers,TimeoutMs\n";
+constexpr const char* METRICS_FILE = "memory_result_no_memory_optimization_with_early_release_with_session_id.csv";
+constexpr const char* METRICS_HEADER = "Timestamp,Session,TotalMemory(MB),PeakMemory(MB),ActiveBuffers,TotalBuffers,CacheHit(MB)\n";
 
 constexpr size_t NormalizeBufferSize(size_t size) {
   return (size + 15) / 16 * 16;
@@ -168,11 +168,15 @@ constexpr std::initializer_list<std::pair<const size_t, size_t>> BUCKET_DEFAULT_
 class BucketCacheManager : public IBufferCacheManager {
  private:
   // Memory metrics
-  int64_t total_memory_{0};     // Current total allocated memory
-  int64_t peak_memory_{0};      // Peak memory usage observed
-  int64_t active_buffers_{0};   // Number of buffers currently in use
-  int64_t total_buffers_{0};    // Total number of buffers (active + cached)
-  std::ofstream metrics_file_;  // File stream for logging metrics
+  int64_t total_memory_{0};      // Current total allocated memory
+  int64_t peak_memory_{0};       // Peak memory usage observed
+  int64_t active_buffers_{0};    // Number of buffers currently in use
+  int64_t total_buffers_{0};     // Total number of buffers (active + cached)
+  std::ofstream metrics_file_;   // File stream for logging metrics
+
+  // Session tracking
+  int64_t session_id_{0};         // Current session ID
+  int64_t session_cache_hit_{0};  // Cache hit buffer size in current session
  public:
   BucketCacheManager() : buckets_limit_{BUCKET_DEFAULT_LIMIT_TABLE} {
     Initialize();
@@ -198,6 +202,7 @@ class BucketCacheManager : public IBufferCacheManager {
     if (it != buckets_.end() && !it->second.empty()) {
       auto buffer = it->second.back();
       it->second.pop_back();
+      session_cache_hit_ += buffer_size;
       UpdateMetrics(true, 0);
       return buffer;
     }
@@ -274,14 +279,20 @@ class BucketCacheManager : public IBufferCacheManager {
     auto now = std::chrono::system_clock::now();
     auto time_t_now = std::chrono::system_clock::to_time_t(now);
     std::tm tm_now;
-    localtime_s(&tm_now, &time_t_now);  // Use localtime_s for thread safety
+#ifdef _WIN32
+    localtime_s(&tm_now, &time_t_now);
+#else
+    localtime_r(&time_t_now, &tm_now);
+#endif  // Use localtime_s for thread safety
     metrics_file_ << std::put_time(&tm_now, "%Y-%m-%d %H:%M:%S") << ","
+                  << session_id_ << ","
                   << std::fixed << std::setprecision(2)
                   << static_cast<double>(total_memory_) / (1024 * 1024) << ","  // Convert to MB
                   << static_cast<double>(peak_memory_) / (1024 * 1024) << ","
                   << active_buffers_ << ","
                   << total_buffers_ << ","
-                  << 0 << std::endl;
+                  << static_cast<double>(session_cache_hit_) / (1024 * 1024)  // Convert to MB
+                  << std::endl;
     metrics_file_.flush();
   }
 
