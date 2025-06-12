@@ -137,6 +137,18 @@ class BucketCacheManager : public IBufferCacheManager {
  private:
   static constexpr size_t MAX_BUCKET_COUNT = 500;
   static constexpr size_t INITIAL_BUCKET_LIMIT = 100;
+  static constexpr const char* CACHE_STATS_FILE = "cache_stats.csv";
+
+  // Cache statistics tracking
+  struct CacheStats {
+    size_t hits{0};             // Number of cache hits
+    size_t misses{0};           // Number of cache misses
+    size_t total_requests{0};   // Total number of requests
+    size_t total_bytes{0};      // Total bytes requested
+    size_t miss_bytes{0};       // Total bytes missed
+  };
+  std::unordered_map<size_t, CacheStats> session_stats_;  // Stats per buffer size for current session
+  std::ofstream cache_stats_file_;  // File for cache statistics
 
   // Memory metrics
   int64_t total_memory_{0};      // Current total allocated memory
@@ -147,7 +159,7 @@ class BucketCacheManager : public IBufferCacheManager {
   bool first_run_ended_{false};  // Track if first run has ended
 
   // Session tracking
-  int64_t session_id_{0};         // Current session ID
+  int64_t session_id_{-1};         // Current session ID
   int64_t session_cache_hit_{0};  // Cache hit buffer size in current session
  public:
   BucketCacheManager() {
@@ -160,12 +172,17 @@ class BucketCacheManager : public IBufferCacheManager {
 
   void OnRunStart() override {
     current_run_usage_.clear();
-    // Reset session metrics
+    ++session_id_;
   }
 
   void OnRunEnd() override {
     first_run_ended_ = true;
-    session_id_++;
+
+    // Log cache statistics for the session
+    LogCacheStats();
+
+    // Clear session stats for next session
+    session_stats_.clear();
 
     // Update memory patterns based on this run
     for (const auto& usage : current_run_usage_) {
@@ -206,14 +223,24 @@ class BucketCacheManager : public IBufferCacheManager {
   }
 
   WGPUBuffer TryAcquireCachedBuffer(size_t buffer_size) override {
+    // Update cache statistics
+    auto& stats = session_stats_[buffer_size];
+    stats.total_requests++;
+    stats.total_bytes += buffer_size;
+
     auto it = buckets_.find(buffer_size);
     if (it != buckets_.end() && !it->second.empty()) {
       auto buffer = it->second.back();
       it->second.pop_back();
       session_cache_hit_ += buffer_size;
+      stats.hits++;
       UpdateMetrics(true, 0);
       return buffer;
     }
+
+    // Record cache miss
+    stats.misses++;
+    stats.miss_bytes += buffer_size;
     return nullptr;
   }
 
@@ -328,6 +355,9 @@ class BucketCacheManager : public IBufferCacheManager {
     if (metrics_file_.is_open()) {
       metrics_file_.close();
     }
+    if (cache_stats_file_.is_open()) {
+      cache_stats_file_.close();
+    }
   }
 
  protected:
@@ -339,7 +369,7 @@ class BucketCacheManager : public IBufferCacheManager {
 
  private:
   static constexpr size_t kRunsBeforeAdjustment = 1;   // Number of runs before adjusting buckets
-  static constexpr size_t kMinFrequencyThreshold = 3;  // Minimum frequency to create a bucket
+  static constexpr size_t kMinFrequencyThreshold = 1;  // Minimum frequency to create a bucket
   static constexpr float kHeadroomFactor = 1.1f;       // Add 10% headroom to max concurrent use
 
   size_t run_count_{0};
@@ -351,6 +381,44 @@ class BucketCacheManager : public IBufferCacheManager {
       metrics_file_ << METRICS_HEADER;
       metrics_file_.flush();
     }
+
+    // Open cache statistics file
+    cache_stats_file_.open(CACHE_STATS_FILE, std::ios::out | std::ios::trunc);
+    if (cache_stats_file_.is_open()) {
+      cache_stats_file_ << "Session,BufferSize,Requests,Hits,Misses,HitRate,TotalBytes,MissBytes,MissRate\n";
+      cache_stats_file_.flush();
+    }
+  }
+
+  void LogCacheStats() {
+    if (!cache_stats_file_.is_open()) return;
+
+    // Sort buffer sizes for consistent output
+    std::vector<size_t> sizes;
+    for (const auto& pair : session_stats_) {
+      sizes.push_back(pair.first);
+    }
+    std::sort(sizes.begin(), sizes.end());
+
+    for (size_t size : sizes) {
+      const auto& stats = session_stats_[size];
+      if (stats.total_requests == 0) continue;
+
+      float hit_rate = static_cast<float>(stats.hits) / stats.total_requests * 100;
+      float miss_rate = static_cast<float>(stats.miss_bytes) / stats.total_bytes * 100;
+
+      cache_stats_file_ << session_id_ << ","
+                       << size << ","
+                       << stats.total_requests << ","
+                       << stats.hits << ","
+                       << stats.misses << ","
+                       << std::fixed << std::setprecision(2) << hit_rate << "%,"
+                       << stats.total_bytes << ","
+                       << stats.miss_bytes << ","
+                       << std::fixed << std::setprecision(2) << miss_rate << "%"
+                       << std::endl;
+    }
+    cache_stats_file_.flush();
   }
 
   void LogMetrics() {
