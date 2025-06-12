@@ -50,6 +50,12 @@ class IBufferCacheManager {
 
   // when a stream refresh is requested
   virtual void OnRefresh() = 0;
+
+  // Track start of inference run
+  virtual void OnRunStart() {}
+
+  // Track end of inference run and update memory patterns
+  virtual void OnRunEnd() {}
 };
 
 //
@@ -68,6 +74,20 @@ class BufferManager {
   void Release(WGPUBuffer buffer);
   void Download(WGPUBuffer src, void* dst, size_t size);
   void RefreshPendingBuffers();
+
+  void OnRunStart() {
+    if (storage_cache_) storage_cache_->OnRunStart();
+    if (uniform_cache_) uniform_cache_->OnRunStart();
+    if (query_resolve_cache_) query_resolve_cache_->OnRunStart();
+    if (default_cache_) default_cache_->OnRunStart();
+  }
+
+  void OnRunEnd() {
+    if (storage_cache_) storage_cache_->OnRunEnd();
+    if (uniform_cache_) uniform_cache_->OnRunEnd();
+    if (query_resolve_cache_) query_resolve_cache_->OnRunEnd();
+    if (default_cache_) default_cache_->OnRunEnd();
+  }
 
  private:
   IBufferCacheManager& GetCacheManager(wgpu::BufferUsage usage) const;
