@@ -189,7 +189,7 @@ class BucketCacheManager : public IBufferCacheManager {
 
   // Session tracking
   int64_t session_id_{-1};         // Current session ID
-  int64_t session_cache_hit_{0};  // Cache hit buffer size in current session
+  int64_t session_cache_miss_{0};  // Cache hit buffer size in current session
  public:
   BucketCacheManager() : buckets_limit_{BUCKET_DEFAULT_LIMIT_TABLE} {
     Initialize();
@@ -232,7 +232,6 @@ class BucketCacheManager : public IBufferCacheManager {
     if (it != buckets_.end() && !it->second.empty()) {
       auto buffer = it->second.back();
       it->second.pop_back();
-      session_cache_hit_ += buffer_size;
       stats.hits++;
       UpdateMetrics(true, 0);
       return buffer;
@@ -241,6 +240,7 @@ class BucketCacheManager : public IBufferCacheManager {
     // Record cache miss
     stats.misses++;
     stats.miss_bytes += buffer_size;
+    session_cache_miss_ += buffer_size;
     return nullptr;
   }
 
@@ -367,7 +367,7 @@ class BucketCacheManager : public IBufferCacheManager {
                   << static_cast<double>(peak_memory_) / (1024 * 1024) << ","
                   << active_buffers_ << ","
                   << total_buffers_ << ","
-                  << static_cast<double>(session_cache_hit_) / (1024 * 1024)  // Convert to MB
+                  << static_cast<double>(session_cache_miss_) / (1024 * 1024)  // Convert to MB
                   << std::endl;
     metrics_file_.flush();
   }
