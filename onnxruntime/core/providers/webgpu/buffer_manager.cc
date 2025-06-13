@@ -160,7 +160,7 @@ class BucketCacheManager : public IBufferCacheManager {
 
   // Session tracking
   int64_t session_id_{-1};         // Current session ID
-  int64_t session_cache_hit_{0};  // Cache hit buffer size in current session
+  int64_t session_cache_miss_{0};  // Cache hit buffer size in current session
  public:
   BucketCacheManager() {
     OpenMetricsFile();
@@ -205,21 +205,14 @@ class BucketCacheManager : public IBufferCacheManager {
     // Track usage for the current run and session
     current_run_usage_[request_size]++;
 
-    if (!first_run_ended_) {
-      if (buckets_.find(request_size) == buckets_.end() && buckets_.size() < MAX_BUCKET_COUNT) {
-        buckets_.emplace(request_size, std::vector<WGPUBuffer>());
-        buckets_limit_.emplace(request_size, INITIAL_BUCKET_LIMIT);
-        buckets_keys_.push_back(request_size);
-        std::sort(buckets_keys_.begin(), buckets_keys_.end());
-      }
+    if (buckets_.find(request_size) == buckets_.end() && buckets_.size() < MAX_BUCKET_COUNT) {
+      buckets_.emplace(request_size, std::vector<WGPUBuffer>());
+      buckets_limit_.emplace(request_size, INITIAL_BUCKET_LIMIT);
+      buckets_keys_.push_back(request_size);
+      std::sort(buckets_keys_.begin(), buckets_keys_.end());
     }
 
-    // Find appropriate bucket size
-    auto it = std::lower_bound(buckets_keys_.begin(), buckets_keys_.end(), request_size);
-    if (it == buckets_keys_.end()) {
-      return request_size;
-    }
-    return *it;
+    return request_size;
   }
 
   WGPUBuffer TryAcquireCachedBuffer(size_t buffer_size) override {
@@ -232,7 +225,6 @@ class BucketCacheManager : public IBufferCacheManager {
     if (it != buckets_.end() && !it->second.empty()) {
       auto buffer = it->second.back();
       it->second.pop_back();
-      session_cache_hit_ += buffer_size;
       stats.hits++;
       UpdateMetrics(true, 0);
       return buffer;
@@ -241,6 +233,7 @@ class BucketCacheManager : public IBufferCacheManager {
     // Record cache miss
     stats.misses++;
     stats.miss_bytes += buffer_size;
+    session_cache_miss_ += buffer_size;
     return nullptr;
   }
 
@@ -439,7 +432,7 @@ class BucketCacheManager : public IBufferCacheManager {
                   << static_cast<double>(peak_memory_) / (1024 * 1024) << ","
                   << active_buffers_ << ","
                   << total_buffers_ << ","
-                  << static_cast<double>(session_cache_hit_) / (1024 * 1024)  // Convert to MB
+                  << static_cast<double>(session_cache_miss_) / (1024 * 1024)  // Convert to MB
                   << std::endl;
     metrics_file_.flush();
   }
