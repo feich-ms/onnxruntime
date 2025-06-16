@@ -14,6 +14,8 @@ namespace webgpu {
 namespace {
 constexpr const char* METRICS_FILE = "memory_result_no_memory_optimization_with_early_release_with_session_id.csv";
 constexpr const char* METRICS_HEADER = "Timestamp,Session,TotalMemory(MB),PeakMemory(MB),ActiveBuffers,TotalBuffers,CacheHit(MB)\n";
+constexpr const char* CACHE_STATS_FILE = "cache_stats_no_memory_optimization_with_early_release_with_session_id.csv";
+constexpr const char* CACHE_STATS_HEADER = "Session,BufferSize,Requests,TotalRequestedSize,TotalNormalizedSize,Hits,HitBytes,HitRate,Misses,MissBytes,MissRate\n";
 
 constexpr size_t NormalizeBufferSize(size_t size) {
   return (size + 15) / 16 * 16;
@@ -167,15 +169,16 @@ constexpr std::initializer_list<std::pair<const size_t, size_t>> BUCKET_DEFAULT_
 
 class BucketCacheManager : public IBufferCacheManager {
  private:
-  static constexpr const char* CACHE_STATS_FILE = "cache_stats.csv";
-
   // Cache statistics tracking
   struct CacheStats {
     size_t hits{0};             // Number of cache hits
     size_t misses{0};           // Number of cache misses
     size_t total_requests{0};   // Total number of requests
-    size_t total_bytes{0};      // Total bytes requested
-    size_t miss_bytes{0};       // Total bytes missed
+    uint64_t total_bytes{0};      // Total bytes requested
+    uint64_t miss_bytes{0};       // Total bytes missed
+    uint64_t hit_bytes{0};        // Total bytes hit
+    uint64_t total_requested_size{0};  // Total requested size across all requests
+    uint64_t total_normalized_size{0}; // Total normalized size across all requests
   };
   std::unordered_map<size_t, CacheStats> session_stats_;  // Stats per buffer size for current session
   std::ofstream cache_stats_file_;  // File for cache statistics
@@ -189,7 +192,8 @@ class BucketCacheManager : public IBufferCacheManager {
 
   // Session tracking
   int64_t session_id_{-1};         // Current session ID
-  int64_t session_cache_miss_{0};  // Cache hit buffer size in current session
+  int64_t total_cache_hit_{0};  // Cache hit buffer size in current session
+  int64_t total_cache_miss_{0};  // Cache hit buffer size in current session
  public:
   BucketCacheManager() : buckets_limit_{BUCKET_DEFAULT_LIMIT_TABLE} {
     Initialize();
@@ -213,13 +217,18 @@ class BucketCacheManager : public IBufferCacheManager {
   }
 
   size_t CalculateBufferSize(size_t request_size) override {
+    size_t normalized_size = NormalizeBufferSize(request_size);
     // binary serch size
     auto it = std::lower_bound(buckets_keys_.begin(), buckets_keys_.end(), request_size);
-    if (it == buckets_keys_.end()) {
-      return NormalizeBufferSize(request_size);
-    } else {
-      return *it;
+    if (it != buckets_keys_.end()) {
+      normalized_size = *it;
     }
+
+    auto& stats = session_stats_[normalized_size];
+    stats.total_requested_size += request_size;
+    stats.total_normalized_size += normalized_size;
+
+    return normalized_size;
   }
 
   WGPUBuffer TryAcquireCachedBuffer(size_t buffer_size) override {
@@ -233,6 +242,8 @@ class BucketCacheManager : public IBufferCacheManager {
       auto buffer = it->second.back();
       it->second.pop_back();
       stats.hits++;
+      stats.hit_bytes += buffer_size;
+      total_cache_hit_ += buffer_size;
       UpdateMetrics(true, 0);
       return buffer;
     }
@@ -240,7 +251,7 @@ class BucketCacheManager : public IBufferCacheManager {
     // Record cache miss
     stats.misses++;
     stats.miss_bytes += buffer_size;
-    session_cache_miss_ += buffer_size;
+    total_cache_miss_ += buffer_size;
     return nullptr;
   }
 
@@ -313,7 +324,7 @@ class BucketCacheManager : public IBufferCacheManager {
     // Open cache statistics file
     cache_stats_file_.open(CACHE_STATS_FILE, std::ios::out | std::ios::trunc);
     if (cache_stats_file_.is_open()) {
-      cache_stats_file_ << "Session,BufferSize,Requests,Hits,Misses,HitRate,TotalBytes,MissBytes,MissRate\n";
+      cache_stats_file_ << CACHE_STATS_HEADER;
       cache_stats_file_.flush();
     }
   }
@@ -333,15 +344,21 @@ class BucketCacheManager : public IBufferCacheManager {
       if (stats.total_requests == 0) continue;
 
       float hit_rate = static_cast<float>(stats.hits) / stats.total_requests * 100;
-      float miss_rate = static_cast<float>(stats.miss_bytes) / stats.total_bytes * 100;
+      float miss_rate = static_cast<float>(stats.misses) / stats.total_requests * 100;
+      if (stats.total_bytes != stats.total_normalized_size) {
+        cache_stats_file_ << "Warning: Total bytes and total normalized size do not match for size "
+                         << size << ". This indicates a bug in the buffer cache manager." << std::endl;
+      }
 
       cache_stats_file_ << session_id_ << ","
                        << size << ","
                        << stats.total_requests << ","
+                       << stats.total_requested_size << ","
+                       << stats.total_normalized_size << ","
                        << stats.hits << ","
-                       << stats.misses << ","
+                       << stats.hit_bytes << ","
                        << std::fixed << std::setprecision(2) << hit_rate << "%,"
-                       << stats.total_bytes << ","
+                       << stats.misses << ","
                        << stats.miss_bytes << ","
                        << std::fixed << std::setprecision(2) << miss_rate << "%"
                        << std::endl;
@@ -367,7 +384,8 @@ class BucketCacheManager : public IBufferCacheManager {
                   << static_cast<double>(peak_memory_) / (1024 * 1024) << ","
                   << active_buffers_ << ","
                   << total_buffers_ << ","
-                  << static_cast<double>(session_cache_miss_) / (1024 * 1024)  // Convert to MB
+                  << static_cast<double>(total_cache_hit_) / (1024 * 1024) << "," // Convert to MB
+                  << static_cast<double>(total_cache_miss_) / (1024 * 1024)  // Convert to MB
                   << std::endl;
     metrics_file_.flush();
   }
