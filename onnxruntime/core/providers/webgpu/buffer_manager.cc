@@ -213,13 +213,6 @@ class BucketCacheManager : public IBufferCacheManager {
     stats.total_requested_size += request_size;
     stats.total_normalized_size += normalized_size;
 
-    if (buckets_.find(normalized_size) == buckets_.end() && buckets_.size() < MAX_BUCKET_COUNT) {
-      buckets_.emplace(normalized_size, std::vector<WGPUBuffer>());
-      buckets_limit_.emplace(normalized_size, INITIAL_BUCKET_LIMIT);
-      buckets_keys_.push_back(normalized_size);
-      std::sort(buckets_keys_.begin(), buckets_keys_.end());
-    }
-
     return normalized_size;
   }
 
