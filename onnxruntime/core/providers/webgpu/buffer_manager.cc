@@ -12,9 +12,9 @@ namespace onnxruntime {
 namespace webgpu {
 
 namespace {
-constexpr const char* METRICS_FILE = "memory_result_no_memory_optimization_with_early_release_with_session_id.csv";
+constexpr const char* METRICS_FILE = "memory_result_no_memory_optimization_with_early_release_with_session_id_apply_jiajia_fix.csv";
 constexpr const char* METRICS_HEADER = "Timestamp,Session,TotalMemory(MB),PeakMemory(MB),ActiveBuffers,TotalBuffers,CacheHit(MB)\n";
-constexpr const char* CACHE_STATS_FILE = "cache_stats_no_memory_optimization_with_early_release_with_session_id.csv";
+constexpr const char* CACHE_STATS_FILE = "cache_stats_no_memory_optimization_with_early_release_with_session_id_apply_jiajia_fix.csv";
 constexpr const char* CACHE_STATS_HEADER = "Session,BufferSize,Requests,TotalRequestedSize,TotalNormalizedSize,Hits,HitBytes,HitRate,Misses,MissBytes,MissRate\n";
 
 constexpr size_t NormalizeBufferSize(size_t size) {
