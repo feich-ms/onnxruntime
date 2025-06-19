@@ -170,7 +170,7 @@ class BucketCacheManager : public IBufferCacheManager {
   BucketCacheManager() {
     OpenMetricsFile();
   }
-  BucketCacheManager(std::unordered_map<size_t, size_t>&& buckets_limit) : buckets_limit_{buckets_limit} {
+  BucketCacheManager(std::unordered_map<size_t, size_t>&& buckets_limit) {
     Initialize();
     OpenMetricsFile();
   }
@@ -215,7 +215,6 @@ class BucketCacheManager : public IBufferCacheManager {
 
     if (buckets_.find(normalized_size) == buckets_.end() && buckets_.size() < MAX_BUCKET_COUNT) {
       buckets_.emplace(normalized_size, std::vector<WGPUBuffer>());
-      buckets_limit_.emplace(normalized_size, INITIAL_BUCKET_LIMIT);
       buckets_keys_.push_back(normalized_size);
       std::sort(buckets_keys_.begin(), buckets_keys_.end());
     }
@@ -256,7 +255,7 @@ class BucketCacheManager : public IBufferCacheManager {
     auto buffer_size = static_cast<size_t>(wgpuBufferGetSize(buffer));
 
     auto it = buckets_.find(buffer_size);
-    if (it != buckets_.end() && it->second.size() < buckets_limit_[buffer_size]) {
+    if (it != buckets_.end()) {
       it->second.emplace_back(buffer);
       UpdateMetrics(false, 0);
     } else {
@@ -286,12 +285,10 @@ class BucketCacheManager : public IBufferCacheManager {
 
     // Store old buckets to handle transitions
     auto old_buckets = std::move(buckets_);
-    auto old_limits = std::move(buckets_limit_);
 
     // Clear and recreate buckets structure
     buckets_keys_.clear();
     buckets_.clear();
-    buckets_limit_.clear();
 
     // Create new buckets based on patterns
     for (const auto& pattern : patterns) {
@@ -299,28 +296,15 @@ class BucketCacheManager : public IBufferCacheManager {
         size_t bucket_size = NormalizeBufferSize(pattern.request_size);
         buckets_keys_.push_back(bucket_size);
 
-        // Calculate new limit based primarily on max concurrent use with some headroom
-        size_t new_limit = static_cast<size_t>(pattern.max_concurrent_use * kHeadroomFactor);
-        buckets_limit_[bucket_size] = new_limit;
-
         // Initialize bucket vector
         auto& bucket = buckets_[bucket_size];
 
         // If this size existed before, transfer buffers up to new limit
         auto old_bucket_it = old_buckets.find(bucket_size);
         if (old_bucket_it != old_buckets.end()) {
-          size_t transfer_count = std::min(old_bucket_it->second.size(), new_limit);
-          bucket.reserve(transfer_count);
-
           // Transfer buffers from old to new bucket
-          for (size_t i = 0; i < transfer_count; ++i) {
+          for (size_t i = 0; i < old_bucket_it->second.size(); ++i) {
             bucket.push_back(old_bucket_it->second[i]);
-          }
-
-          // Release any excess buffers
-          for (size_t i = transfer_count; i < old_bucket_it->second.size(); ++i) {
-            UpdateMetrics(false, wgpuBufferGetSize(old_bucket_it->second[i]), false, true);
-            wgpuBufferRelease(old_bucket_it->second[i]);
           }
 
           old_bucket_it->second.clear();
@@ -367,7 +351,6 @@ class BucketCacheManager : public IBufferCacheManager {
   void Initialize() {
     buckets_.reserve(MAX_BUCKET_COUNT);
     buckets_keys_.reserve(MAX_BUCKET_COUNT);
-    buckets_limit_.reserve(MAX_BUCKET_COUNT);
   }
 
  private:
@@ -481,7 +464,7 @@ class BucketCacheManager : public IBufferCacheManager {
     }
     LogMetrics();
   }
-  std::unordered_map<size_t, size_t> buckets_limit_;
+
   std::unordered_map<size_t, std::vector<WGPUBuffer>> buckets_;
   std::vector<size_t> buckets_keys_;
 };
