@@ -208,7 +208,7 @@ class BucketCacheManager : public IBufferCacheManager {
     size_t normalized_size = NormalizeBufferSize(request_size);
 
     // Add logging for normalized_size == 16 and session_id between 0-3
-    if (normalized_size == 16 && session_id_ >= 0 && session_id_ <= 3) {
+    if (normalized_size == 16 && session_id_ >= -1 && session_id_ <= 3) {
       std::ofstream log_file("buffer_operations.log", std::ios::app);
       if (log_file.is_open()) {
         log_file << "[Session " << session_id_
@@ -249,7 +249,7 @@ class BucketCacheManager : public IBufferCacheManager {
       total_cache_hit_ += buffer_size;
       UpdateMetrics(true, 0);
       // Log buffer acquisition attempt
-      if (buffer_size == 16 && session_id_ >= 0 && session_id_ <= 3) {
+      if (buffer_size == 16 && session_id_ >= -1 && session_id_ <= 3) {
         std::ofstream log_file("buffer_operations.log", std::ios::app);
         if (log_file.is_open()) {
           log_file << "[Session " << session_id_
@@ -271,7 +271,7 @@ class BucketCacheManager : public IBufferCacheManager {
     const auto buffer_size = wgpuBufferGetSize(buffer);
 
     // Log buffer registration
-    if (buffer_size == 16 && session_id_ >= 0 && session_id_ <= 3) {
+    if (buffer_size == 16 && session_id_ >= -1 && session_id_ <= 3) {
       std::ofstream log_file("buffer_operations.log", std::ios::app);
       if (log_file.is_open()) {
         log_file << "[Session " << session_id_
@@ -292,7 +292,7 @@ class BucketCacheManager : public IBufferCacheManager {
       it->second.emplace_back(buffer);
       UpdateMetrics(false, 0);
       // Log buffer release
-      if (buffer_size == 16 && session_id_ >= 0 && session_id_ <= 3) {
+      if (buffer_size == 16 && session_id_ >= -1 && session_id_ <= 3) {
         std::ofstream log_file("buffer_operations.log", std::ios::app);
         if (log_file.is_open()) {
           log_file << "[Session " << session_id_
@@ -304,7 +304,7 @@ class BucketCacheManager : public IBufferCacheManager {
       UpdateMetrics(false, buffer_size);
       wgpuBufferRelease(buffer);
       // Log buffer release
-      if (buffer_size == 16 && session_id_ >= 0 && session_id_ <= 3) {
+      if (buffer_size == 16 && session_id_ >= -1 && session_id_ <= 3) {
         std::ofstream log_file("buffer_operations.log", std::ios::app);
         if (log_file.is_open()) {
           log_file << "[Session " << session_id_
@@ -372,7 +372,7 @@ class BucketCacheManager : public IBufferCacheManager {
             UpdateMetrics(false, wgpuBufferGetSize(old_bucket_it->second[i]), false, true);
             wgpuBufferRelease(old_bucket_it->second[i]);
             // Log buffer release
-            if (wgpuBufferGetSize(old_bucket_it->second[i]) == 16 && session_id_ >= 0 && session_id_ <= 3) {
+            if (wgpuBufferGetSize(old_bucket_it->second[i]) == 16 && session_id_ >= -1 && session_id_ <= 3) {
               std::ofstream log_file("buffer_operations.log", std::ios::app);
               if (log_file.is_open()) {
                 log_file << "[Session " << session_id_
@@ -400,7 +400,7 @@ class BucketCacheManager : public IBufferCacheManager {
         UpdateMetrics(false, wgpuBufferGetSize(buffer), false, true);
         wgpuBufferRelease(buffer);
         // Log buffer release
-        if (wgpuBufferGetSize(buffer) == 16 && session_id_ >= 0 && session_id_ <= 3) {
+        if (wgpuBufferGetSize(buffer) == 16 && session_id_ >= -1 && session_id_ <= 3) {
           std::ofstream log_file("buffer_operations.log", std::ios::app);
           if (log_file.is_open()) {
             log_file << "[Session " << session_id_
