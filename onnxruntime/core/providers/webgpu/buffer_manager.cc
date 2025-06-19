@@ -226,7 +226,6 @@ class BucketCacheManager : public IBufferCacheManager {
 
     if (buckets_.find(normalized_size) == buckets_.end() && buckets_.size() < MAX_BUCKET_COUNT) {
       buckets_.emplace(normalized_size, std::vector<WGPUBuffer>());
-      buckets_limit_.emplace(normalized_size, INITIAL_BUCKET_LIMIT);
       buckets_keys_.push_back(normalized_size);
       std::sort(buckets_keys_.begin(), buckets_keys_.end());
     }
@@ -288,7 +287,7 @@ class BucketCacheManager : public IBufferCacheManager {
     auto buffer_size = static_cast<size_t>(wgpuBufferGetSize(buffer));
 
     auto it = buckets_.find(buffer_size);
-    if (it != buckets_.end() && it->second.size() < buckets_limit_[buffer_size]) {
+    if (it != buckets_.end()) {
       it->second.emplace_back(buffer);
       UpdateMetrics(false, 0);
       // Log buffer release
@@ -336,12 +335,10 @@ class BucketCacheManager : public IBufferCacheManager {
 
     // Store old buckets to handle transitions
     auto old_buckets = std::move(buckets_);
-    auto old_limits = std::move(buckets_limit_);
 
     // Clear and recreate buckets structure
     buckets_keys_.clear();
     buckets_.clear();
-    buckets_limit_.clear();
 
     // Create new buckets based on patterns
     for (const auto& pattern : patterns) {
@@ -349,37 +346,15 @@ class BucketCacheManager : public IBufferCacheManager {
         size_t bucket_size = NormalizeBufferSize(pattern.request_size);
         buckets_keys_.push_back(bucket_size);
 
-        // Calculate new limit based primarily on max concurrent use with some headroom
-        size_t new_limit = static_cast<size_t>(pattern.max_concurrent_use * kHeadroomFactor);
-        buckets_limit_[bucket_size] = new_limit;
-
         // Initialize bucket vector
         auto& bucket = buckets_[bucket_size];
 
         // If this size existed before, transfer buffers up to new limit
         auto old_bucket_it = old_buckets.find(bucket_size);
         if (old_bucket_it != old_buckets.end()) {
-          size_t transfer_count = std::min(old_bucket_it->second.size(), new_limit);
-          bucket.reserve(transfer_count);
-
           // Transfer buffers from old to new bucket
-          for (size_t i = 0; i < transfer_count; ++i) {
+          for (size_t i = 0; i < old_bucket_it->second.size(); ++i) {
             bucket.push_back(old_bucket_it->second[i]);
-          }
-
-          // Release any excess buffers
-          for (size_t i = transfer_count; i < old_bucket_it->second.size(); ++i) {
-            UpdateMetrics(false, wgpuBufferGetSize(old_bucket_it->second[i]), false, true);
-            wgpuBufferRelease(old_bucket_it->second[i]);
-            // Log buffer release
-            if (wgpuBufferGetSize(old_bucket_it->second[i]) == 16 && session_id_ >= -1 && session_id_ <= 3) {
-              std::ofstream log_file("buffer_operations.log", std::ios::app);
-              if (log_file.is_open()) {
-                log_file << "[Session " << session_id_
-                        << "] Releasing excess buffer: size=" << wgpuBufferGetSize(old_bucket_it->second[i]) << std::endl;
-                log_file.close();
-              }
-            }
           }
 
           old_bucket_it->second.clear();
