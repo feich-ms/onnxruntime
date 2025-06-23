@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <fstream>
 #include <iosfwd>
 
 #include "core/providers/webgpu/webgpu_external_header.h"
@@ -116,6 +117,44 @@ struct MemoryUsagePattern {
 
   MemoryUsagePattern(size_t size = 0, size_t freq = 0)
       : request_size(size), frequency(freq) {}
+};
+
+// Base class for bucket cache managers that includes shared logging functionality
+class BucketCacheManagerBase : public IBufferCacheManager {
+protected:
+  // Cache statistics tracking
+  struct CacheStats {
+    size_t hits{0};             // Number of cache hits
+    size_t misses{0};           // Number of cache misses
+    size_t total_requests{0};   // Total number of requests
+    uint64_t miss_bytes{0};       // Total bytes missed
+    uint64_t hit_bytes{0};        // Total bytes hit
+    uint64_t total_requested_size{0};  // Total requested size across all requests
+    uint64_t total_normalized_size{0}; // Total normalized size across all requests
+  };
+
+  // Memory metrics
+  int64_t total_memory_{0};      // Current total allocated memory
+  int64_t peak_memory_{0};       // Peak memory usage observed
+  int64_t active_buffers_{0};    // Number of buffers currently in use
+  int64_t total_buffers_{0};     // Total number of buffers (active + cached)
+
+  // Session tracking
+  int64_t session_id_{-1};         // Current session ID
+  int64_t total_cache_hit_{0};     // Cache hit buffer size in current session
+  int64_t total_cache_miss_{0};    // Cache miss buffer size in current session
+
+  std::unordered_map<size_t, CacheStats> session_stats_;  // Stats per buffer size for current session
+  std::ofstream cache_stats_file_;     // File for cache statistics
+  std::ofstream memory_metrics_file_;   // File stream for logging metrics
+
+  virtual void OpenFiles(const char* memory_metrics_filename, const char* cache_stats_filename);
+  void LogCacheStats();
+  void LogMemoryMetrics();
+  void UpdateMemoryMetrics(bool is_allocation, size_t buffer_size, bool is_from_destructor = false, bool skip_active_buffers_update = false);
+
+  BucketCacheManagerBase();
+  virtual ~BucketCacheManagerBase();
 };
 
 }  // namespace webgpu
