@@ -22,7 +22,7 @@ void EnforceBufferUnmapped(WebGpuContext& context, WGPUBuffer buffer) {
 }  // namespace
 
 class DisabledCacheManager : public IBufferCacheManager {
-  size_t CalculateBufferSize(size_t request_size) override {
+  size_t CalculateBufferSize(size_t request_size, bool is_before_init) override {
     return NormalizeBufferSize(request_size);
   }
 
@@ -43,7 +43,7 @@ class DisabledCacheManager : public IBufferCacheManager {
 };
 
 class LazyReleaseCacheManager : public IBufferCacheManager {
-  size_t CalculateBufferSize(size_t request_size) override {
+  size_t CalculateBufferSize(size_t request_size, bool is_before_init) override {
     return NormalizeBufferSize(request_size);
   }
 
@@ -80,7 +80,7 @@ class LazyReleaseCacheManager : public IBufferCacheManager {
 };
 
 class SimpleCacheManager : public IBufferCacheManager {
-  size_t CalculateBufferSize(size_t request_size) override {
+  size_t CalculateBufferSize(size_t request_size, bool is_before_init) override {
     return NormalizeBufferSize(request_size);
   }
 
@@ -168,14 +168,18 @@ class BucketCacheManager : public IBufferCacheManager {
     Initialize();
   }
 
-  size_t CalculateBufferSize(size_t request_size) override {
-    // binary serch size
-    auto it = std::lower_bound(buckets_keys_.begin(), buckets_keys_.end(), request_size);
-    if (it == buckets_keys_.end()) {
-      return NormalizeBufferSize(request_size);
-    } else {
-      return *it;
+  size_t CalculateBufferSize(size_t request_size, bool is_before_init) override {
+    size_t normalized_size = NormalizeBufferSize(request_size);
+
+    if (!is_before_init) {
+      // binary serch size
+      auto it = std::lower_bound(buckets_keys_.begin(), buckets_keys_.end(), request_size);
+      if (it != buckets_keys_.end()) {
+        normalized_size = *it;
+      }
     }
+
+    return normalized_size;
   }
 
   WGPUBuffer TryAcquireCachedBuffer(size_t buffer_size) override {
@@ -193,30 +197,20 @@ class BucketCacheManager : public IBufferCacheManager {
   }
 
   void ReleaseBuffer(WGPUBuffer buffer) override {
-    pending_buffers_.emplace_back(buffer);
+    auto buffer_size = static_cast<size_t>(wgpuBufferGetSize(buffer));
+    auto it = buckets_.find(buffer_size);
+    if (it != buckets_.end() && it->second.size() < buckets_limit_[buffer_size]) {
+      it->second.emplace_back(buffer);
+    } else {
+      wgpuBufferRelease(buffer);
+    }
   }
 
   void OnRefresh() override {
-    // TODO: consider graph capture. currently not supported
-
-    for (auto& buffer : pending_buffers_) {
-      auto buffer_size = static_cast<size_t>(wgpuBufferGetSize(buffer));
-
-      auto it = buckets_.find(buffer_size);
-      if (it != buckets_.end() && it->second.size() < buckets_limit_[buffer_size]) {
-        it->second.emplace_back(buffer);
-      } else {
-        wgpuBufferRelease(buffer);
-      }
-    }
-
-    pending_buffers_.clear();
+    // no-op
   }
 
   ~BucketCacheManager() {
-    for (auto& buffer : pending_buffers_) {
-      wgpuBufferRelease(buffer);
-    }
     for (auto& pair : buckets_) {
       for (auto& buffer : pair.second) {
         wgpuBufferRelease(buffer);
@@ -245,7 +239,6 @@ class BucketCacheManager : public IBufferCacheManager {
   }
   std::unordered_map<size_t, size_t> buckets_limit_;
   std::unordered_map<size_t, std::vector<WGPUBuffer>> buckets_;
-  std::vector<WGPUBuffer> pending_buffers_;
   std::vector<size_t> buckets_keys_;
 };
 
@@ -283,7 +276,7 @@ class DynamicBucketCacheManager : public IBufferCacheManager {
     ++run_id;
   }
 
-  size_t CalculateBufferSize(size_t request_size) override {
+  size_t CalculateBufferSize(size_t request_size, bool is_before_init) override {
     size_t normalized_request_size = NormalizeBufferSize(request_size);
 
     // Track usage for the current run
@@ -493,10 +486,31 @@ WGPUBuffer BufferManager::Create(size_t size, wgpu::BufferUsage usage) {
   return buffer;
 }
 
+WGPUBuffer BufferManager::CreateBeforeSessionInit(size_t size, wgpu::BufferUsage usage) {
+  auto& cache = GetCacheManager(usage);
+  auto buffer_size = cache.CalculateBufferSize(size, true);
+
+  auto buffer = cache.TryAcquireCachedBuffer(buffer_size);
+  if (buffer) {
+    return buffer;
+  }
+
+  // cache miss, create a new buffer
+  wgpu::BufferDescriptor desc{};
+  desc.size = buffer_size;
+  desc.usage = usage;
+  buffer = context_.Device().CreateBuffer(&desc).MoveToCHandle();
+
+  ORT_ENFORCE(buffer, "Failed to create GPU buffer: size=", buffer_size, ", usage=", uint64_t(usage), ".");
+
+  cache.RegisterBuffer(buffer, size);
+  return buffer;
+}
+
 WGPUBuffer BufferManager::CreateUMA(size_t size, wgpu::BufferUsage usage) {
   ORT_ENFORCE(usage & wgpu::BufferUsage::Storage, "UMA buffer must be a storage buffer.");
   auto& cache = GetCacheManager(usage);
-  auto buffer_size = cache.CalculateBufferSize(size);
+  auto buffer_size = cache.CalculateBufferSize(size, true);
 
   // Ensure the buffer is mapped for writing at creation.
   usage |= wgpu::BufferUsage::MapWrite;
