@@ -21,7 +21,8 @@ void* GpuBufferAllocator::Alloc(size_t size) {
   }
 #endif  // !defined(__wasm__)
 
-  return context_.BufferManager().Create(size);
+  return session_initialized_ ? context_.BufferManager().Create(size) :
+                                context_.BufferManager().CreateBeforeSessionInit(size);
 }
 
 void GpuBufferAllocator::Free(void* p) {

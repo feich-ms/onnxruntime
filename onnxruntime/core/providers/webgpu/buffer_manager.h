@@ -39,7 +39,7 @@ class IBufferCacheManager {
   virtual ~IBufferCacheManager() = default;
 
   // calculate actual buffer size to allocate based on the requested size.
-  virtual size_t CalculateBufferSize(size_t request_size) = 0;
+  virtual size_t CalculateBufferSize(size_t request_size, bool is_before_init = false) = 0;
 
   // return a buffer if available in cache. otherwise empty.
   virtual WGPUBuffer TryAcquireCachedBuffer(size_t buffer_size) = 0;
@@ -70,6 +70,7 @@ class BufferManager {
   void Upload(void* src, WGPUBuffer dst, size_t size);
   void MemCpy(WGPUBuffer src, WGPUBuffer dst, size_t size);
   WGPUBuffer Create(size_t size, wgpu::BufferUsage usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc | wgpu::BufferUsage::CopyDst);
+  WGPUBuffer CreateBeforeSessionInit(size_t size, wgpu::BufferUsage usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc | wgpu::BufferUsage::CopyDst);
   // Create a buffer mapped for writing.
   WGPUBuffer CreateUMA(size_t size, wgpu::BufferUsage usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc |
                                                               wgpu::BufferUsage::CopyDst);
