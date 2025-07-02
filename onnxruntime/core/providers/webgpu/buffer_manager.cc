@@ -343,33 +343,23 @@ class BucketCacheManager : public BucketCacheManagerBase {
   }
 
   void ReleaseBuffer(WGPUBuffer buffer) override {
-    pending_buffers_.emplace_back(buffer);
+    auto buffer_size = static_cast<size_t>(wgpuBufferGetSize(buffer));
+
+    auto it = buckets_.find(buffer_size);
+    if (it != buckets_.end() && it->second.size() < buckets_limit_[buffer_size]) {
+      it->second.emplace_back(buffer);
+      UpdateMemoryMetrics(false, 0);
+    } else {
+      UpdateMemoryMetrics(false, buffer_size);
+      wgpuBufferRelease(buffer);
+    }
   }
 
   void OnRefresh() override {
-    // TODO: consider graph capture. currently not supported
-
-    for (auto& buffer : pending_buffers_) {
-      auto buffer_size = static_cast<size_t>(wgpuBufferGetSize(buffer));
-
-      auto it = buckets_.find(buffer_size);
-      if (it != buckets_.end() && it->second.size() < buckets_limit_[buffer_size]) {
-        it->second.emplace_back(buffer);
-        UpdateMemoryMetrics(false, 0);
-      } else {
-        UpdateMemoryMetrics(false, buffer_size);
-        wgpuBufferRelease(buffer);
-      }
-    }
-
-    pending_buffers_.clear();
+    // no-op
   }
 
   ~BucketCacheManager() {
-    for (auto& buffer : pending_buffers_) {
-      UpdateMemoryMetrics(false, wgpuBufferGetSize(buffer), true);
-      wgpuBufferRelease(buffer);
-    }
     for (auto& pair : buckets_) {
       for (auto& buffer : pair.second) {
         UpdateMemoryMetrics(false, wgpuBufferGetSize(buffer), true);
@@ -399,7 +389,6 @@ class BucketCacheManager : public BucketCacheManagerBase {
   }
   std::unordered_map<size_t, size_t> buckets_limit_;
   std::unordered_map<size_t, std::vector<WGPUBuffer>> buckets_;
-  std::vector<WGPUBuffer> pending_buffers_;
   std::vector<size_t> buckets_keys_;
 };
 
